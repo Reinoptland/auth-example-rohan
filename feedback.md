@@ -66,3 +66,5 @@ const newSession = await prisma.session.create({
 
 const session = await createSession(user.email);
 ```
+
+7. Move routes to dedicated files
