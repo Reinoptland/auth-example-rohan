@@ -1,3 +1,4 @@
+// imports together
 var express = require("express");
 var bodyParser = require("body-parser");
 var cors = require("cors");
@@ -5,10 +6,20 @@ var path = require("path");
 const z = require("zod");
 const cookieParser = require("cookie-parser");
 const { PrismaClient } = require("@prisma/client");
+const { v4: uuidv4 } = require("uuid");
+const bcrypt = require("bcrypt");
+
+// config vars
+const SALT_ROUNDS = 10;
+const PORT = process.env.PORT || 9000;
+const SESSION_EXPIRATION_TIME_SECONDS = 30;
+const COOKIE_EXPIRATION_TIME_SECONDS = 60;
+
+// instantiating
 const prisma = new PrismaClient();
 var app = express();
-const bcrypt = require("bcrypt");
-SALT_ROUNDS = 10;
+
+// loading middlewares into express (app.use)
 app.use(bodyParser.json());
 //what is it doing here, html form url encoded
 app.use(express.urlencoded({ extended: false }));
@@ -16,14 +27,12 @@ app.use(express.json());
 app.use(cors());
 app.use(cookieParser());
 app.set("view engine", "ejs");
-const { v4: uuidv4 } = require("uuid");
 app.set("views", path.join(__dirname, "./views"));
 
 app.get("/", async (req, res) => {
   res.render("templates");
 });
 
-const PORT = process.env.PORT || 9000;
 app.listen(PORT, () => {
   console.log("Server listening on http://localhost:" + PORT);
 });
@@ -65,44 +74,64 @@ app.post("/signup", async (req, res) => {
     .json({ message: "New user added to database", user: { id: user.id } });
 });
 
-app.post("/login", (req, res) => {
-  // handle login here
-  let email = req.body.email;
-  let password = req.body.password;
+async function createSession(email) {
+  const sessionToken = uuidv4();
+  const now = new Date();
+  const expiresAt = new Date(+now + SESSION_EXPIRATION_TIME_SECONDS * 1000);
+  const sessionData = {
+    token: sessionToken,
+    email: email,
+    expiry: expiresAt,
+  };
 
-  async function correctUser() {
-    let user = await prisma.user.findFirst({
-      where: {
-        email: email,
-      },
+  const newSession = await prisma.session.create({
+    data: sessionData,
+  });
+
+  return newSession;
+}
+
+async function findUserByEmail(email) {
+  return await prisma.user.findFirst({
+    where: {
+      email: email,
+    },
+  });
+}
+
+function isSessionExpired(dateObject) {
+  return dateObject <= +new Date();
+}
+
+app.post("/login", async (req, res) => {
+  let [validationError, userInfo] = validateSignUp(req.body);
+
+  if (validationError) {
+    return res.status(400).json({
+      message: "Validation Error",
+      issues: validationError.issues,
     });
-
-    if (user != null) {
-      let passwordMatch = bcrypt.compareSync(password, user.password);
-      if (passwordMatch === true) {
-        const sessionToken = uuidv4();
-        const now = new Date();
-        const expiresAt = new Date(+now + 30 * 1000);
-        sessionData = {
-          token: sessionToken,
-          email: user.email,
-          expiry: expiresAt,
-        };
-        const newSession = await prisma.session.create({
-          data: sessionData,
-        });
-        res.cookie("session_token", sessionToken, {
-          expires: new Date(+expiresAt + 60000),
-        });
-        return res.redirect("/welcome");
-      } else if (passwordMatch === false) {
-        return res.status(403).json({ message: "password incorrect" }).end();
-      }
-    } else if (user === null) {
-      return res.status(404).json({ message: "user not found" }).end();
-    }
   }
-  correctUser();
+
+  let user = await findUserByEmail(userInfo.email);
+
+  if (user === null) {
+    return res.status(404).json({ message: "user not found" }).end();
+  }
+
+  let passwordMatch = bcrypt.compareSync(userInfo.password, user.password);
+
+  if (passwordMatch === false) {
+    return res.status(403).json({ message: "password incorrect" }).end();
+  }
+
+  const session = await createSession(user.email);
+
+  res.cookie("session_token", session.token, {
+    expires: new Date(+session.expiry + COOKIE_EXPIRATION_TIME_SECONDS * 1000),
+  });
+
+  return res.redirect("/welcome");
 });
 
 app.get("/login", async (req, res) => {
@@ -123,9 +152,8 @@ app.get("/welcome", async (req, res) => {
   if (!session) {
     return res.redirect("/login");
   }
-  let expiryTime = session.expiry;
 
-  if (expiryTime <= +new Date()) {
+  if (isSessionExpired(session.expiry)) {
     res.redirect("/login");
 
     const deletedUserToken = await prisma.session.delete({
